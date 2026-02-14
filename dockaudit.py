@@ -1055,6 +1055,94 @@ def format_json(filepath: str, findings: list[Finding], score: int, grade: str,
 # Main lint function
 # ---------------------------------------------------------------------------
 
+def validate_dockerignore(dockerfile_path: str) -> list[Finding]:
+    """Validate .dockerignore file for a given Dockerfile.
+    
+    Returns findings related to .dockerignore:
+    - Missing .dockerignore file
+    - Empty .dockerignore
+    - Missing common patterns (.git, node_modules, etc.)
+    """
+    findings = []
+    
+    # Determine .dockerignore path (same directory as Dockerfile)
+    if dockerfile_path == "<stdin>" or dockerfile_path == "-":
+        # Can't validate .dockerignore for stdin input
+        return findings
+    
+    dockerfile_dir = os.path.dirname(dockerfile_path) or "."
+    dockerignore_path = os.path.join(dockerfile_dir, ".dockerignore")
+    
+    # Check if .dockerignore exists
+    if not os.path.exists(dockerignore_path):
+        findings.append(Finding(
+            rule_id="DA099",
+            severity=Severity.WARNING,
+            line=0,
+            end_line=0,
+            title="Missing .dockerignore file",
+            message="No .dockerignore file found. Build context may include unnecessary files.",
+            fix="Create a .dockerignore file to exclude build artifacts, .git, node_modules, etc."
+        ))
+        return findings
+    
+    # Read and validate .dockerignore content
+    try:
+        with open(dockerignore_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except (OSError, IOError):
+        findings.append(Finding(
+            rule_id="DA098",
+            severity=Severity.INFO,
+            line=0,
+            end_line=0,
+            title=".dockerignore read error",
+            message=f"Could not read {dockerignore_path}",
+            fix=""
+        ))
+        return findings
+    
+    # Check if empty
+    non_comment_lines = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+    if not non_comment_lines:
+        findings.append(Finding(
+            rule_id="DA097",
+            severity=Severity.WARNING,
+            line=0,
+            end_line=0,
+            title="Empty .dockerignore",
+            message=".dockerignore exists but contains no patterns",
+            fix="Add common exclusion patterns: .git, *.md, .env, node_modules, __pycache__, etc."
+        ))
+        return findings
+    
+    # Check for common recommended patterns
+    patterns_text = "\n".join(non_comment_lines)
+    recommended = {
+        ".git": "version control history",
+        "*.md": "documentation",
+        ".env": "environment files",
+    }
+    
+    missing_patterns = []
+    for pattern, description in recommended.items():
+        if pattern not in patterns_text:
+            missing_patterns.append(f"{pattern} ({description})")
+    
+    if missing_patterns:
+        findings.append(Finding(
+            rule_id="DA096",
+            severity=Severity.INFO,
+            line=0,
+            end_line=0,
+            title="Common patterns missing from .dockerignore",
+            message=f"Consider adding: {', '.join(missing_patterns)}",
+            fix="Add commonly ignored patterns to reduce build context size and improve security"
+        ))
+    
+    return findings
+
+
 def lint_dockerfile(content: str, ignore_rules: set[str] | None = None,
                     min_severity: Severity = Severity.INFO) -> tuple[list[Finding], int, str, list[str]]:
     """Lint a Dockerfile and return (findings, score, grade, parser_errors)."""
@@ -1162,6 +1250,14 @@ def main(argv: list[str] | None = None) -> int:
         findings, score, grade, parser_errors = lint_dockerfile(
             content, ignore_rules, min_severity
         )
+        
+        # Validate .dockerignore if not ignored
+        dockerignore_findings = validate_dockerignore(filepath)
+        dockerignore_findings = [
+            f for f in dockerignore_findings
+            if f.rule_id not in ignore_rules
+        ]
+        findings.extend(dockerignore_findings)
 
         if args.format == "json":
             all_outputs.append(format_json(filepath, findings, score, grade, parser_errors))
